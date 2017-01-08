@@ -1,0 +1,104 @@
+#!/usr/bin/python
+import sys
+import os
+import requests
+from munin import MuninPlugin
+
+class HuePlugin(MuninPlugin):
+    title = 'Philips Hue Sensors'
+    args = '--base 1000 -l 0'
+    vlabel = 'value'
+    scale = False
+    category = 'sensors'
+    method = 'all'
+
+    @staticmethod
+    def get_url(hub_address, api_key, url):
+        """Construct a URL to call a Hue API endpoint"""
+        return 'http://{0}/api/{1}{2}'.format(hub_address, api_key, url)
+
+    @staticmethod
+    def sensor_id(sensor):
+        """Returns a Munin format ID for the Hue sensor"""
+        return sensor['name'].replace(' ', '_').lower()
+
+    @staticmethod
+    def get_device_uniqueid(sensor):
+        """Returns the sensor's device unique id"""
+        return sensor['uniqueid'].split('-')[0]
+
+    def get_hub_sensors(self):
+        """Returns the list of sensors on a Hue hub as a list of dicts"""
+        hub_address = os.environ.get('hub_address')
+        api_key = os.environ.get('api_key')
+
+        url = self.get_url(hub_address, api_key, '/sensors')
+        ret = requests.get(url)
+
+        if ret and ret.status_code == requests.codes.ok:
+            sensors_json = ret.json()
+            return sensors_json.values()
+   
+    @property
+    def fields(self):
+
+        # Get device names set in the Hue management app, using ZLLPresence
+        names = {}
+        fields = []
+        sensors = self.get_hub_sensors()
+
+        for sensor in sensors:
+            if sensor['type'] == 'ZLLPresence':
+                names[self.get_device_uniqueid(sensor)] = sensor['name']
+                
+        for sensor in sensors:
+            # Skip unneeded sensors
+            if not sensor['type'] in ('ZLLTemperature', 'ZLLLightLevel'):
+                continue
+
+            # Filter sensors based on method called
+            if self.method != 'all' and (sensor['type'] == 'ZLLTemperature' and self.method != 'temperature') or (sensor['type'] == 'ZLLLightLevel' and self.method != 'lightlevel'):
+                continue
+
+            sensor_id = self.sensor_id(sensor)
+            if sensor['type'] == 'ZLLTemperature':
+                label = '{} - Temperature'.format(names[self.get_device_uniqueid(sensor)])
+            if sensor['type'] == 'ZLLLightLevel':
+                label = '{} - Light Level'.format(names[self.get_device_uniqueid(sensor)])
+
+            fields.append((sensor_id, {
+                'label': label,
+                'type': 'GAUGE',
+                'min': '0'
+            }))
+        return fields
+
+    def execute(self):
+        sensors = self.get_hub_sensors()
+
+        results = {}
+        for sensor in sensors:
+            sensor_id = self.sensor_id(sensor)
+            # Temp Sensor
+            if sensor['type'] == 'ZLLTemperature' and self.method in ('temperature', 'all'):
+                results[sensor_id] = float(sensor['state']['temperature']) / 100
+            if sensor['type'] == 'ZLLLightLevel' and self.method in ('lightlevel', 'all'):
+                results[sensor_id] = sensor['state']['lightlevel']
+        return results
+
+    def run(self):
+        method = sys.argv[0].split('_')[1]
+        if method:
+            self.method = method
+
+        if self.method == 'temperature':
+            self.vlabel = 'degrees celcius'
+        elif self.method == 'lightlevel':
+            self.vlabel = 'lux'
+
+        super(HuePlugin, self).run()
+
+if __name__ == "__main__":
+    HuePlugin().run()
+
+
